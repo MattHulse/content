@@ -20,12 +20,12 @@ import logging
 import warnings
 from distutils.util import strtobool
 from distutils.version import LooseVersion
-from datetime import datetime
+from datetime import datetime, timedelta
 from zipfile import ZipFile, ZIP_DEFLATED
 
 from Tests.scripts.utils.content_packs_util import IGNORED_FILES
 from Utils.release_notes_generator import aggregate_release_notes_for_marketplace
-from typing import Tuple, Any, Union
+from typing import Tuple, Any, Union, List
 
 CONTENT_ROOT_PATH = os.path.abspath(os.path.join(__file__, '../../..'))  # full path to content root repo
 PACKS_FOLDER = "Packs"  # name of base packs folder inside content repo
@@ -917,7 +917,7 @@ class Pack(object):
 
             secondary_encryption_key_output_file = zip_pack_path.replace("_not_encrypted.zip", ".enc2.zip")
             full_command_with_secondary_encryption = f'./encryptor ./{pack_name}_not_encrypted.zip ' \
-                f'{secondary_encryption_key_output_file} "{secondary_encryption_key}"'
+                                                     f'{secondary_encryption_key_output_file} "{secondary_encryption_key}"'
             subprocess.call(full_command_with_secondary_encryption, shell=True)
 
             new_artefacts = os.path.join(current_working_dir, private_artifacts_dir)
@@ -962,7 +962,7 @@ class Pack(object):
             if stdout:
                 logging.info(str(stdout))
             if stderr:
-                logging.error(f"Error: Premium pack {self. _pack_name} should be encrypted, but isn't.")
+                logging.error(f"Error: Premium pack {self._pack_name} should be encrypted, but isn't.")
                 return False
             return True
 
@@ -1115,15 +1115,18 @@ class Pack(object):
                 else:
                     _pack_artifacts_path = pack_artifacts_path
 
-                secondary_encryption_key_artifacts_path = zip_pack_path.replace(f'{self._pack_name}', f'{self._pack_name}.enc2')
+                secondary_encryption_key_artifacts_path = zip_pack_path.replace(f'{self._pack_name}',
+                                                                                f'{self._pack_name}.enc2')
 
                 blob = storage_bucket.blob(secondary_encryption_key_bucket_path)
                 blob.cache_control = "no-cache,max-age=0"  # disabling caching for pack blob
                 with open(secondary_encryption_key_artifacts_path, "rb") as pack_zip:
                     blob.upload_from_file(pack_zip)
 
-                print(f"Copying {secondary_encryption_key_artifacts_path} to {_pack_artifacts_path}/packs/{self._pack_name}.zip")
-                shutil.copy(secondary_encryption_key_artifacts_path, f'{_pack_artifacts_path}/packs/{self._pack_name}.zip')
+                print(
+                    f"Copying {secondary_encryption_key_artifacts_path} to {_pack_artifacts_path}/packs/{self._pack_name}.zip")
+                shutil.copy(secondary_encryption_key_artifacts_path,
+                            f'{_pack_artifacts_path}/packs/{self._pack_name}.zip')
 
             self.public_storage_path = blob.public_url
             logging.success(f"Uploaded {self._pack_name} pack to {pack_full_path} path.")
@@ -1690,6 +1693,20 @@ class Pack(object):
             logging.exception(f"Failed in formatting {self._pack_name} pack metadata.")
         finally:
             return task_status
+
+    def pack_created_in_time_delta(self, time_delta: timedelta, index_folder_path: str) -> bool:
+        """
+        Checks if pack created before delta specified in the 'time_delta' argument and return boolean according
+        to the result
+        Args:
+            time_delta: time_delta to check if pack was created before
+            index_folder_path: downloaded index folder directory path.
+
+        Returns:
+            True if pack was created before the time_delta from now, and False otherwise.
+        """
+        pack_creation_time_str = self._get_pack_creation_date(index_folder_path)
+        return datetime.utcnow() - datetime.strptime(pack_creation_time_str, Metadata.DATE_FORMAT) < time_delta
 
     def _get_pack_creation_date(self, index_folder_path):
         """ Gets the pack created date.
@@ -2449,21 +2466,52 @@ def get_packs_statistics_dataframe(bq_client):
     return packs_statistic_table
 
 
-def get_trending_packs(bq_client) -> list:
+def filter_packs_from_before_3_months(pack_list_to_filter: list, index_folder_path: str) -> List[str]:
+    """
+    Filtering packs from 'pack_list_to_filter' that were created more than 3 months ago by checking in the index file
+    Args:
+        pack_list_to_filter: The list of packs sorted by download rate to filter by creation date.
+        index_folder_path: The path in which the index.zip file was unzipped into.
+
+    Returns:
+        A list with pack names that were created within the last 3 months.
+    """
+    index_packs = {os.path.basename(pack_path): Pack(os.path.basename(pack_path), pack_path) for pack_path in
+                   glob.glob(f'{index_folder_path}/*') if os.path.isdir(pack_path)}
+    three_months_delta = timedelta(days=90)
+    filtered_packs_list = []
+    for pack_name in pack_list_to_filter:
+        if index_packs.get(pack_name) and index_packs[pack_name].pack_created_in_time_delta(three_months_delta,
+                                                                                            index_folder_path):
+            filtered_packs_list.append(pack_name)
+    logging.debug(f'packs with less than 3 months creation time: {pformat(filtered_packs_list)}')
+    return filtered_packs_list
+
+
+def get_trending_packs(bq_client, index_folder_path: str) -> list:
     """
     Updates the landing page sections data with Trending packs.
     Trending packs: top 20 downloaded packs in the last 14 days.
     Args:
         bq_client (google.cloud.bigquery.client.Client): The bigquery client with proper permissions to execute the query.
+        index_folder_path (str): the full path of extracted index folder.
     Returns:
         A list with 20 pack names that has the highest download rate.
     """
-    query = f"SELECT pack_name FROM `{GCPConfig.TOP_PACKS_14_DAYS_TABLE}` ORDER BY num_count DESC LIMIT 20"
-    packs_with_highest_download_count_dataframe = bq_client.query(query).result().to_dataframe()
-    packs_with_highest_download_count = [pack_array[0] for pack_array in
-                                         packs_with_highest_download_count_dataframe.to_numpy()]
-    logging.debug(f'Found the following trending packs {pformat(packs_with_highest_download_count)}')
-    return packs_with_highest_download_count
+    query = f"SELECT pack_name FROM `{GCPConfig.TOP_PACKS_14_DAYS_TABLE}` ORDER BY num_count DESC"
+    packs_sorted_by_download_count_dataframe = bq_client.query(query).result().to_dataframe()
+    packs_sorted_by_download_count = [pack_array[0] for pack_array in
+                                      packs_sorted_by_download_count_dataframe.to_numpy()]
+    filtered_pack_list = filter_packs_from_before_3_months(packs_sorted_by_download_count, index_folder_path)
+    top_downloaded_packs = filtered_pack_list[:20]
+    current_iteration_index = 0
+    while len(top_downloaded_packs) < 20:
+        current_pack = packs_sorted_by_download_count[current_iteration_index]
+        if current_pack not in top_downloaded_packs:
+            top_downloaded_packs.append(current_pack)
+        current_iteration_index += 1
+    logging.debug(f'Found the following trending packs {pformat(top_downloaded_packs)}')
+    return top_downloaded_packs
 
 
 def input_to_list(input_data, capitalize_input=False):

@@ -931,9 +931,6 @@ def main():
     # google cloud bigquery client initialized
     bq_client = init_bigquery_client(service_account)
 
-    landing_page_sections = load_json(LANDING_PAGE_SECTIONS_PATH)
-    trending_packs = get_trending_packs(bq_client)
-
     if storage_base_path:
         GCPConfig.STORAGE_BASE_PATH = storage_base_path
 
@@ -944,6 +941,8 @@ def main():
     # download and extract index from public bucket
     index_folder_path, index_blob, index_generation = download_and_extract_index(storage_bucket,
                                                                                  extract_destination_path)
+    landing_page_sections = load_json(LANDING_PAGE_SECTIONS_PATH)
+    trending_packs = get_trending_packs(bq_client, index_folder_path)
 
     # content repo client initialized
     content_repo = get_content_git_client(CONTENT_ROOT_PATH)
