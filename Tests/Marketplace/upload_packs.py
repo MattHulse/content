@@ -966,7 +966,6 @@ def main():
         check_if_index_is_updated(index_folder_path, content_repo, current_commit_hash, previous_commit_hash,
                                   storage_bucket, is_private_content_updated)
 
-    # google cloud bigquery client initialized
     packs_statistic_df = get_packs_statistics_dataframe(bq_client)
 
     # clean index and gcs from non existing or invalid packs
